@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Restore
+        run: dotnet restore TBankNet.Invoicing.slnx
+
+      - name: Build
+        run: dotnet build TBankNet.Invoicing.slnx --configuration Release --no-restore
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Restore
+        run: dotnet restore TBankNet.Invoicing.slnx
+
+      - name: Test
+        run: dotnet test TBankNet.Invoicing.slnx --configuration Release --verbosity normal
+
+  pack:
+    name: Pack
+    needs: [build, test]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Restore
+        run: dotnet restore TBankNet.Invoicing.slnx
+
+      - name: Build
+        run: dotnet build TBankNet.Invoicing.slnx --configuration Release --no-restore
+
+      - name: Pack Packages
+        run: dotnet pack TBankNet.Invoicing.slnx --configuration Release --no-build --output artifacts/packages
+
+      - name: Upload Packages
+        uses: actions/upload-artifact@v5
+        with:
+          name: packages
+          path: artifacts/packages/*

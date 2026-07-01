@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/TBankNet.Invoicing/TBankNet.Invoicing.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/TBankNet.Invoicing.Tests/TBankNet.Invoicing.Tests.csproj" />
+  </Folder>
+</Solution>
