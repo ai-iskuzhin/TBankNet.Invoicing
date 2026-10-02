@@ -33,6 +33,7 @@ Targets `netstandard2.0`, `net8.0` and `net10.0`. On `net8.0`/`net10.0` the buil
 | --- | --- | --- | --- |
 | Send an invoice | `SendInvoiceAsync` | `POST /api/v1/invoice/send` | 4 |
 | Get invoice info | `GetInvoiceAsync` | `GET /api/v1/openapi/invoice/{invoiceId}/info` | 20 |
+| Download the invoice file | `GetInvoiceDocumentAsync` | `GET` on the `pdfUrl` link | — |
 
 Full field reference: [docs/api-invoicing.md](docs/api-invoicing.md).
 
@@ -72,7 +73,26 @@ var info = await client.GetInvoiceAsync(result.InvoiceId);
 Console.WriteLine(info.Status);              // Draft / Submitted / Executed
 ```
 
-### Authentication and tracing
+### The invoice file
+
+```csharp
+var document = await client.GetInvoiceDocumentAsync(result.PdfUrl);
+
+await File.WriteAllBytesAsync(document.FileName ?? "invoice.pdf", document.Content);
+Console.WriteLine(document.ContentType);  // application/pdf
+Console.WriteLine(document.FileName);     // Счет № 3 от 29.09.26.pdf
+```
+
+The request carries no Bearer token: the link is authorized by its own token, and it reaches this
+method from the bank's response through caller code, so the API token must not travel there. The
+link's host is checked against the configured environment, so this cannot be used to fetch arbitrary
+URLs.
+
+> `business.tbank.ru` is issued by the Минцифры "Russian Trusted" CA, which is absent from most
+> container trust stores. If the handshake fails with `UntrustedRoot`, add that root to the handler
+> of the `HttpClient` you pass to the client.
+
+## Authentication and tracing
 
 Authentication uses a Bearer API token. An `X-Request-Id` header is generated for every request; you can set it explicitly via the `requestId` parameter, and the effective value is available on `result.Metadata.RequestId`.
 

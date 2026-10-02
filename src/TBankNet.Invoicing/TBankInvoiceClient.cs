@@ -99,6 +99,96 @@ public sealed class TBankInvoiceClient
         return SendAsync<object?, TBankInvoiceInfo>(HttpMethod.Get, path, body: null, requestId, cancellationToken);
     }
 
+    /// <summary>
+    /// Скачивает файл счета по ссылке, полученной при выставлении.
+    /// </summary>
+    /// <remarks>
+    /// Ссылка <see cref="TBankInvoiceSendResult.PdfUrl"/> ведет на публичный документ
+    /// (<c>/invoices/api/v1/public/document/{token}</c>) — отдельный путь, не под базовым адресом
+    /// T-API, но на том же хосте. Запрос уходит <b>без</b> Bearer-токена: документ авторизуется самим
+    /// токеном в ссылке, и отправлять туда API-токен значило бы раскрывать его по адресу, который
+    /// пришел из ответа банка.
+    /// <para>
+    /// Хост ссылки сверяется с хостом настроенного окружения, чтобы метод нельзя было использовать
+    /// как скачиватель произвольных URL.
+    /// </para>
+    /// </remarks>
+    /// <param name="documentUrl">Ссылка из <see cref="TBankInvoiceSendResult.PdfUrl"/>.</param>
+    /// <param name="requestId">Значение заголовка <c>X-Request-Id</c>. Если null, генерируется автоматически.</param>
+    /// <param name="cancellationToken">Токен отмены.</param>
+    /// <returns>Содержимое файла, его MIME-тип и имя из <c>Content-Disposition</c>.</returns>
+    /// <exception cref="TBankInvoiceValidationException">Если ссылка пуста, не абсолютна, не https или ведет на другой хост.</exception>
+    /// <exception cref="TBankInvoiceApiException">Если банк вернул статус вне диапазона 2xx (например, документ уже удален).</exception>
+    /// <exception cref="TBankInvoiceTransportException">Если ответ не получен из-за ошибки транспорта.</exception>
+    /// <exception cref="TBankInvoiceProtocolException">Если ответ пришел с пустым телом.</exception>
+    public async Task<TBankInvoiceDocument> GetInvoiceDocumentAsync(
+        string documentUrl,
+        string? requestId = null,
+        CancellationToken cancellationToken = default)
+    {
+        var endpoint = TBankInvoiceRequestValidator.ValidateDocumentUrl(
+            documentUrl, options.ResolveBaseAddress().Host);
+        var effectiveRequestId = string.IsNullOrWhiteSpace(requestId) ? Guid.NewGuid().ToString() : requestId!;
+        HttpResponseMessage response;
+
+        try
+        {
+            using var httpRequest = new HttpRequestMessage(HttpMethod.Get, endpoint);
+            httpRequest.Headers.TryAddWithoutValidation("X-Request-Id", effectiveRequestId);
+            httpRequest.Headers.UserAgent.ParseAdd(UserAgent);
+            httpRequest.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/pdf"));
+            httpRequest.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("*/*", 0.1));
+
+            response = await httpClient.SendAsync(httpRequest, cancellationToken).ConfigureAwait(false);
+        }
+        catch (HttpRequestException exception)
+        {
+            throw new TBankInvoiceTransportException(
+                "T-Bank GET invoice document request failed before a response was received.",
+                exception);
+        }
+
+        using (response)
+        {
+            var responseRequestId = ReadRequestId(response, effectiveRequestId);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                // Тело ошибки здесь может быть и JSON, и HTML — CreateApiException разберет что сможет.
+#if NETSTANDARD2_0
+                var errorBody = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+#else
+                var errorBody = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+#endif
+                throw CreateApiException(
+                    HttpMethod.Get, endpoint.AbsolutePath, response.StatusCode, responseRequestId, errorBody);
+            }
+
+#if NETSTANDARD2_0
+            var content = await response.Content.ReadAsByteArrayAsync().ConfigureAwait(false);
+#else
+            var content = await response.Content.ReadAsByteArrayAsync(cancellationToken).ConfigureAwait(false);
+#endif
+
+            if (content.Length == 0)
+            {
+                throw new TBankInvoiceProtocolException(
+                    $"T-Bank GET {endpoint.AbsolutePath} returned an empty document body. HTTP {(int)response.StatusCode} ({response.StatusCode}).",
+                    response.StatusCode,
+                    responseRequestId);
+            }
+
+            return new TBankInvoiceDocument
+            {
+                Content = content,
+                ContentType = response.Content.Headers.ContentType?.MediaType,
+                FileName = ReadFileName(response),
+                // Сырое тело бинарное, поэтому в метаданные оно не попадает ни при каких настройках.
+                Metadata = CreateResponseMetadata(response, responseRequestId, string.Empty, captureRawResponseBody: false)
+            };
+        }
+    }
+
     private async Task<TResponse> SendAsync<TRequest, TResponse>(
         HttpMethod method,
         string relativePath,
@@ -218,6 +308,56 @@ public sealed class TBankInvoiceClient
                 preview,
                 exception);
         }
+    }
+
+    /// <summary>
+    /// Достает имя файла из <c>Content-Disposition</c>, предпочитая RFC 5987 (<c>filename*</c>).
+    /// </summary>
+    /// <remarks>
+    /// <see cref="System.Net.Http.Headers.ContentDispositionHeaderValue"/> отдает <c>FileNameStar</c>
+    /// уже раскодированным, но у T-Bank имя русское, и часть стеков кладет его в обычный
+    /// <c>filename</c> в процентной кодировке — поэтому запасной путь раскодируется вручную. Имя
+    /// очищается от путей: оно приходит снаружи и может попасть в имя файла на диске.
+    /// </remarks>
+    private static string? ReadFileName(HttpResponseMessage response)
+    {
+        var disposition = response.Content.Headers.ContentDisposition;
+        if (disposition is null)
+        {
+            return null;
+        }
+
+        var raw = disposition.FileNameStar;
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            raw = disposition.FileName?.Trim('"');
+            if (!string.IsNullOrWhiteSpace(raw) && raw!.IndexOf('%') >= 0)
+            {
+                try
+                {
+                    raw = Uri.UnescapeDataString(raw);
+                }
+                catch (UriFormatException)
+                {
+                    // Не процентная кодировка — оставляем как пришло.
+                }
+            }
+        }
+
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return null;
+        }
+
+        // Только имя: "../../etc/passwd" или "C:\\x.pdf" не должны пережить этот метод.
+        var name = raw!.Replace('\\', '/');
+        var slash = name.LastIndexOf('/');
+        if (slash >= 0)
+        {
+            name = name.Substring(slash + 1);
+        }
+
+        return string.IsNullOrWhiteSpace(name) ? null : name;
     }
 
     private static string? ReadRequestId(HttpResponseMessage response, string fallback)

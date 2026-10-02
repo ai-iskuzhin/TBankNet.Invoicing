@@ -89,4 +89,43 @@ internal static class TBankInvoiceRequestValidator
             throw new TBankInvoiceValidationException("invoiceId is required.");
         }
     }
+
+    /// <summary>
+    /// Проверяет ссылку на файл счета и возвращает ее как <see cref="Uri"/>.
+    /// </summary>
+    /// <remarks>
+    /// Хост сверяется с <paramref name="expectedHost"/> (хостом API) намеренно: ссылка приходит из
+    /// ответа банка, но доходит сюда через код вызывающего, и клиент не должен становиться средством
+    /// скачивания произвольных адресов. Схема обязана быть https — токен документа не должен уйти
+    /// по открытому каналу.
+    /// </remarks>
+    /// <param name="documentUrl">Ссылка из <see cref="TBankInvoiceSendResult.PdfUrl"/>.</param>
+    /// <param name="expectedHost">Хост, которому должна принадлежать ссылка.</param>
+    /// <returns>Разобранная ссылка.</returns>
+    /// <exception cref="TBankInvoiceValidationException">Если ссылка пуста, не абсолютна, не https или ведет на другой хост.</exception>
+    public static Uri ValidateDocumentUrl(string documentUrl, string expectedHost)
+    {
+        if (string.IsNullOrWhiteSpace(documentUrl))
+        {
+            throw new TBankInvoiceValidationException("documentUrl is required.");
+        }
+
+        if (!Uri.TryCreate(documentUrl, UriKind.Absolute, out var uri))
+        {
+            throw new TBankInvoiceValidationException("documentUrl must be an absolute URI.");
+        }
+
+        if (!string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new TBankInvoiceValidationException("documentUrl must use https.");
+        }
+
+        if (!string.Equals(uri.Host, expectedHost, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new TBankInvoiceValidationException(
+                $"documentUrl host '{uri.Host}' does not match the configured T-Bank host '{expectedHost}'.");
+        }
+
+        return uri;
+    }
 }

@@ -33,6 +33,7 @@ dotnet add package TBankNet.Invoicing
 | --- | --- | --- | --- |
 | Выставить счет | `SendInvoiceAsync` | `POST /api/v1/invoice/send` | 4 |
 | Получить информацию о счете | `GetInvoiceAsync` | `GET /api/v1/openapi/invoice/{invoiceId}/info` | 20 |
+| Скачать файл счета | `GetInvoiceDocumentAsync` | `GET` по ссылке `pdfUrl` | — |
 
 Полное описание полей — в [docs/api-invoicing.md](docs/api-invoicing.md).
 
@@ -76,6 +77,24 @@ var info = await client.GetInvoiceAsync(result.InvoiceId);
 
 Console.WriteLine(info.Status);   // Draft / Submitted / Executed
 ```
+
+### Файл счета
+
+```csharp
+var document = await client.GetInvoiceDocumentAsync(result.PdfUrl);
+
+await File.WriteAllBytesAsync(document.FileName ?? "invoice.pdf", document.Content);
+Console.WriteLine(document.ContentType);  // application/pdf
+Console.WriteLine(document.FileName);     // Счет № 3 от 29.09.26.pdf
+```
+
+Запрос уходит без Bearer-токена: ссылка авторизуется своим токеном, и отправлять туда API-токен
+значило бы раскрывать его по адресу, пришедшему из ответа банка. Хост ссылки сверяется с хостом
+настроенного окружения, поэтому метод нельзя использовать как скачиватель произвольных URL.
+
+> `business.tbank.ru` выпущен УЦ Минцифры («Russian Trusted»), которого нет в стандартном хранилище
+> доверия большинства контейнеров. Если рукопожатие падает с `UntrustedRoot`, добавьте этот корневой
+> сертификат в обработчик того `HttpClient`, который вы передаете клиенту.
 
 ### Авторизация и трассировка
 

@@ -121,4 +121,104 @@ public sealed class ClientTests
 
         await Assert.ThrowsAsync<TBankInvoiceValidationException>(() => client.GetInvoiceAsync("  "));
     }
+
+    // ── Скачивание файла счета ────────────────────────────────────────────────
+    // Реальный заголовок от T-Bank: имя по-русски, в кодировке RFC 5987.
+    private const string RealDisposition =
+        "inline; filename*=UTF-8''%D0%A1%D1%87%D0%B5%D1%82%20%E2%84%96%203%20%D0%BE%D1%82%2029.09.26.pdf";
+
+    private static readonly byte[] PdfBytes = "%PDF-1.5 fake"u8.ToArray();
+
+    private const string DocumentUrl =
+        "https://business.tbank.ru/invoices/api/v1/public/document/7HYo2w6EM199yXvDFtkPt3w4sYNjUHAGx1g";
+
+    [Fact]
+    public async Task GetInvoiceDocument_returns_bytes_type_and_decoded_russian_file_name()
+    {
+        var handler = StubHttpMessageHandler.Binary(PdfBytes, "application/pdf", RealDisposition);
+        var client = CreateClient(handler);
+
+        var document = await client.GetInvoiceDocumentAsync(DocumentUrl);
+
+        Assert.Equal(PdfBytes, document.Content);
+        Assert.Equal("application/pdf", document.ContentType);
+        Assert.Equal("Счет № 3 от 29.09.26.pdf", document.FileName);
+        Assert.Equal(HttpStatusCode.OK, document.Metadata!.HttpStatusCode);
+    }
+
+    [Fact]
+    public async Task GetInvoiceDocument_does_not_send_the_api_token()
+    {
+        // Ссылка авторизуется своим токеном; отправлять туда API-токен — утечка.
+        var handler = StubHttpMessageHandler.Binary(PdfBytes);
+        var client = CreateClient(handler);
+
+        await client.GetInvoiceDocumentAsync(DocumentUrl);
+
+        Assert.Null(handler.LastRequest!.Headers.Authorization);
+        Assert.Equal(HttpMethod.Get, handler.LastRequest.Method);
+        Assert.Equal(DocumentUrl, handler.LastRequest.RequestUri!.AbsoluteUri);
+        Assert.True(handler.LastRequest.Headers.Contains("X-Request-Id"));
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("/invoices/api/v1/public/document/abc")]
+    [InlineData("http://business.tbank.ru/invoices/api/v1/public/document/abc")]
+    [InlineData("https://evil.example.com/invoices/api/v1/public/document/abc")]
+    public async Task GetInvoiceDocument_rejects_anything_but_an_https_url_on_the_configured_host(string url)
+    {
+        var handler = StubHttpMessageHandler.Binary(PdfBytes);
+        var client = CreateClient(handler);
+
+        await Assert.ThrowsAsync<TBankInvoiceValidationException>(
+            () => client.GetInvoiceDocumentAsync(url));
+        Assert.Null(handler.LastRequest); // отвергнуто до выхода в сеть
+    }
+
+    [Fact]
+    public async Task GetInvoiceDocument_throws_api_exception_when_the_document_is_gone()
+    {
+        var handler = new StubHttpMessageHandler(HttpStatusCode.NotFound, """{"errorCode":"404"}""");
+        var client = CreateClient(handler);
+
+        var exception = await Assert.ThrowsAsync<TBankInvoiceApiException>(
+            () => client.GetInvoiceDocumentAsync(DocumentUrl));
+
+        Assert.Equal(HttpStatusCode.NotFound, exception.HttpStatusCode);
+    }
+
+    [Fact]
+    public async Task GetInvoiceDocument_throws_protocol_exception_on_an_empty_body()
+    {
+        var handler = StubHttpMessageHandler.Binary([]);
+        var client = CreateClient(handler);
+
+        await Assert.ThrowsAsync<TBankInvoiceProtocolException>(
+            () => client.GetInvoiceDocumentAsync(DocumentUrl));
+    }
+
+    [Fact]
+    public async Task GetInvoiceDocument_leaves_file_name_null_without_a_disposition_header()
+    {
+        var handler = StubHttpMessageHandler.Binary(PdfBytes, "application/pdf", contentDisposition: null);
+        var client = CreateClient(handler);
+
+        var document = await client.GetInvoiceDocumentAsync(DocumentUrl);
+
+        Assert.Null(document.FileName);
+    }
+
+    [Fact]
+    public async Task GetInvoiceDocument_strips_any_path_from_the_served_file_name()
+    {
+        var handler = StubHttpMessageHandler.Binary(
+            PdfBytes, "application/pdf", "attachment; filename=\"../../etc/passwd\"");
+        var client = CreateClient(handler);
+
+        var document = await client.GetInvoiceDocumentAsync(DocumentUrl);
+
+        Assert.Equal("passwd", document.FileName);
+    }
 }
